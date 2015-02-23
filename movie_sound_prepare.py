@@ -24,14 +24,16 @@ def generate_temp_name(prefix, extension):
 
 def parse_stream_info(stream_line):
     stream_info = {}
-    pattern = '^Stream #\d:\d\((?P<lang>[a-z]{3})\): Audio: (?P<codec>[a-zA-Z0-9]{1,5}), .*?, (?P<channels>.*?),.*$'
+    pattern = '^Stream #\d:\d(\((?P<lang>[a-z]{3})\))?: Audio: (?P<codec>[a-zA-Z0-9]{1,5}), .*?, (?P<channels>.*?),.*$'
     s_match = re.match(pattern, stream_line)
     keys = ['codec', 'lang', 'channels']
+    print(stream_line)
     if s_match:
         stream_info = { key : s_match.group(key) for key in keys}
     return stream_info
 
 def extract_audio_streams(input_file, lang='eng'):
+    lang_wanted = {'eng', 'und'}
     if input_file.find(' ') != -1:
         input_file = '"{}"'.format(input_file)
     exec_line = 'ffmpeg.exe -i {}'.format(input_file)
@@ -53,8 +55,15 @@ def extract_audio_streams(input_file, lang='eng'):
     stream_info = [parse_stream_info(single_line) for single_line in streams]
     for idx in range(len(stream_info)):
         stream_info[idx]['index'] = idx
-    stream_info = [single_stream for single_stream in stream_info if single_stream['lang'] == lang]
 
+    # Apply filtering by language only if language is defined in stream info and 
+    # at least one stream is of wanted language.
+    lang_found = {single_stream['lang'] for single_stream in stream_info}
+    lang_inter = lang_wanted.intersection(lang_found)
+    filter_by_lang = len(lang_inter) > 0
+    if filter_by_lang:
+        stream_info = [single_stream for single_stream in stream_info
+                                     if single_stream['lang'] in lang_inter]
     return stream_info
 
 def encode_streams(input_file, stream_info):
@@ -62,6 +71,7 @@ def encode_streams(input_file, stream_info):
     whole_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav - | neroaacenc -q 0.xx -ignorelength -if - -of temp.m4a'
     ffmpeg_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav -'
     aac_pattern = 'neroaacenc -q 0.42 -ignorelength -if - -of {}'
+    out_files = []
     if input_file.find(' ') != -1:
         input_file = '"{}"'.format(input_file)
     for stream in stream_info:
@@ -73,9 +83,26 @@ def encode_streams(input_file, stream_info):
         print (ffmpeg_line)
         print (aac_line)
         sarge.run(ffmpeg_line + ' | ' + aac_line)
+        out_files.append(tempname)
+    return out_files
 
+def generate_output_name(input_name):
+    (base, ext) = os.path.splitext(input_name)
+    return base + '_aac.mkv'
+
+def mux_streams(input_file, encoded_streams):
+    mkv_pattern = 'mkvmerge -o "{0}" --no-audio "{1}"'
+    mka_pattern = '--language 0:eng "{0}"'
+
+    mkv_line = mkv_pattern.format(generate_output_name(input_file), input_file)
+    audio_lines = [mka_pattern.format(single_stream) for single_stream in encoded_streams]
+    mkv_line += ' ' + ' '.join(audio_lines)
+    print(mkv_line)
+    sarge.run(mkv_line)
 
 if __name__ == '__main__':
     args = parse_args()
     streams = extract_audio_streams(args.input)
-    streams = encode_streams(args.input, streams)
+    enc_streams = encode_streams(args.input, streams)
+    mux_streams(args.input, enc_streams)
+
