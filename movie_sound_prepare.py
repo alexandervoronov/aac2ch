@@ -1,6 +1,7 @@
 #!python3
 
 import argparse
+import glob
 import re
 import sarge
 import subprocess
@@ -100,9 +101,18 @@ def mux_streams(input_file, encoded_streams):
     print(mkv_line)
     sarge.run(mkv_line)
 
-if __name__ == '__main__':
-    args = parse_args()
-    streams = extract_audio_streams(args.input)
-    enc_streams = encode_streams(args.input, streams)
-    mux_streams(args.input, enc_streams)
+def extract_input_list(input_mask):
+    return glob.glob(input_mask)
 
+def run():
+    args = parse_args()
+    input_list = extract_input_list(args.input)
+    for input_file in input_list:
+        print('Processing {}'.format(input_file))
+        streams = extract_audio_streams(input_file)
+        enc_streams = encode_streams(input_file, streams)
+        mux_streams(input_file, enc_streams)
+    print('Done.')
+
+if __name__ == '__main__':
+    run()
