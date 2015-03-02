@@ -1,5 +1,10 @@
 #!python3
 
+# Script for batch conversion of 5.1 audio tracks to AAC 2.0.
+# Requires ffmpeg, neroaacenc and mkvmerge.
+#
+# Special thanks to @slhck for explanation of audio gain ffmpeg options.
+
 import argparse
 import glob
 import re
@@ -67,11 +72,29 @@ def extract_audio_streams(input_file, lang='eng'):
                                      if single_stream['lang'] in lang_inter]
     return stream_info
 
-def encode_streams(input_file, stream_info):
+def estimate_audio_gain(input_file, single_stream_info):
+    ssi = single_stream_info
     ffmpeg_2ch = ' -ac 2 '
-    whole_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav - | neroaacenc -q 0.xx -ignorelength -if - -of temp.m4a'
-    ffmpeg_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav -'
+
+    rg_analyze_pattern = 'ffmpeg -hide_banner -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -af "volumedetect" -f wav -y {3}'
+    channel_setting = ffmpeg_2ch if ssi['channels'].find('5.1') != -1 else ''
+    rg_line = rg_analyze_pattern.format(input_file, ssi['index'], channel_setting, os.devnull)
+    rg_proc = sarge.run(rg_line, stdout=sarge.Capture(), stderr=sarge.Capture())
+    # print(rg_proc.stdout.text)
+    maxvol_pattern = 'max_volume: -?([\d\.]+) dB'
+    dbm = re.findall(maxvol_pattern, rg_proc.stderr.text)
+    assert(len(dbm) == 1)
+    result = float(dbm[0])
+    return result
+
+def encode_streams(input_file, stream_info):
+    apply_gain = True
+    ffmpeg_2ch = ' -ac 2 '
+    # whole_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav - | neroaacenc -q 0.xx -ignorelength -if - -of temp.m4a'
+    ffmpeg_pattern = 'ffmpeg -hide_banner -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} {3} -f wav -'
     aac_pattern = 'neroaacenc -q 0.42 -ignorelength -if - -of {}'
+    gain_pattern = ' -af "volume=+{0:.1f}dB" '
+    
     out_files = []
     if input_file.find(' ') != -1:
         input_file = '"{}"'.format(input_file)
@@ -79,7 +102,11 @@ def encode_streams(input_file, stream_info):
         tempname = generate_temp_name('stream{}'.format(stream['index']), 'm4a')
         stream['tempfile'] = tempname
         channel_setting = ffmpeg_2ch if stream['channels'].find('5.1') != -1 else ''
-        ffmpeg_line = ffmpeg_pattern.format(input_file, stream['index'], channel_setting)
+        volume_setting = ''
+        if apply_gain:
+            gain = estimate_audio_gain(input_file, stream)
+            volume_setting = gain_pattern.format(gain)
+        ffmpeg_line = ffmpeg_pattern.format(input_file, stream['index'], channel_setting, volume_setting)
         aac_line = aac_pattern.format(tempname)
         print (ffmpeg_line)
         print (aac_line)
@@ -93,7 +120,7 @@ def generate_output_name(input_name):
 
 def mux_streams(input_file, encoded_streams):
     mkv_pattern = 'mkvmerge -o "{0}" --no-audio "{1}"'
-    mka_pattern = '--language 0:eng "{0}"'
+    mka_pattern = '--language 0:eng --no-chapters "{0}"'
 
     mkv_line = mkv_pattern.format(generate_output_name(input_file), input_file)
     audio_lines = [mka_pattern.format(single_stream) for single_stream in encoded_streams]
@@ -104,6 +131,13 @@ def mux_streams(input_file, encoded_streams):
 def extract_input_list(input_mask):
     return glob.glob(input_mask)
 
+def delete_encoded_streams(encoded_streams):
+    for stream in encoded_streams:
+        try:
+            os.remove(stream)
+        except Exception as e:
+            print(e)
+
 def run():
     args = parse_args()
     input_list = extract_input_list(args.input)
@@ -112,6 +146,7 @@ def run():
         streams = extract_audio_streams(input_file)
         enc_streams = encode_streams(input_file, streams)
         mux_streams(input_file, enc_streams)
+        delete_encoded_streams(enc_streams)
     print('Done.')
 
 if __name__ == '__main__':
