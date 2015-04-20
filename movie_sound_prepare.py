@@ -18,6 +18,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--input', dest='input', type=str,
                         required=True, help='Input movie file.')
+    parser.add_argument('-l', '--lang', dest='lang', type=str,
+                        default='eng', help='Filter audio tracks by language ("all" to keep all tracks).')
     
     return parser.parse_args()
 
@@ -38,8 +40,10 @@ def parse_stream_info(stream_line):
         stream_info = { key : s_match.group(key) for key in keys}
     return stream_info
 
-def extract_audio_streams(input_file, lang='eng'):
-    lang_wanted = {'eng', 'und'}
+def extract_audio_streams(input_file, lang):
+    lang_wanted = set()
+    if lang != 'all':
+        lang_wanted = {lang, 'und'}
     if input_file.find(' ') != -1:
         input_file = '"{}"'.format(input_file)
     exec_line = 'ffmpeg.exe -i {}'.format(input_file)
@@ -62,7 +66,7 @@ def extract_audio_streams(input_file, lang='eng'):
     for idx in range(len(stream_info)):
         stream_info[idx]['index'] = idx
 
-    # Apply filtering by language only if language is defined in stream info and 
+    # Apply filtering by language only if language is defined in stream info and
     # at least one stream is of wanted language.
     lang_found = {single_stream['lang'] for single_stream in stream_info}
     lang_inter = lang_wanted.intersection(lang_found)
@@ -129,7 +133,8 @@ def mux_streams(input_file, encoded_streams):
     sarge.run(mkv_line)
 
 def extract_input_list(input_mask):
-    return glob.glob(input_mask)
+    target = input_mask.replace('[', '[[]')
+    return glob.glob(target)
 
 def delete_encoded_streams(encoded_streams):
     for stream in encoded_streams:
@@ -143,7 +148,7 @@ def run():
     input_list = extract_input_list(args.input)
     for input_file in input_list:
         print('Processing {}'.format(input_file))
-        streams = extract_audio_streams(input_file)
+        streams = extract_audio_streams(input_file, args.lang)
         enc_streams = encode_streams(input_file, streams)
         mux_streams(input_file, enc_streams)
         delete_encoded_streams(enc_streams)
