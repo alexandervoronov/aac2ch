@@ -20,6 +20,14 @@ def parse_args():
                         required=True, help='Input movie file.')
     parser.add_argument('-l', '--lang', dest='lang', type=str,
                         default='eng', help='Filter audio tracks by language ("all" to keep all tracks).')
+    parser.add_argument('-p', '--podcast', dest='podcast',
+                        default=False, action='store_true', help='Output only audiotrack.')
+    parser.add_argument('-c', '--channels', dest='channels', type=int,
+                        default=0, help='Number of channels in output audio.')
+    parser.add_argument('--mono', dest='channels', action='store_const', const=1,
+                        help='Convert audio to mono')
+    parser.add_argument('--stereo', dest='channels', action='store_const', const=2,
+                        help='Convert audio to stereo')
     
     return parser.parse_args()
 
@@ -32,7 +40,7 @@ def generate_temp_name(prefix, extension):
 
 def parse_stream_info(stream_line):
     stream_info = {}
-    pattern = '^Stream #\d:\d(\((?P<lang>[a-z]{3})\))?: Audio: (?P<codec>[a-zA-Z0-9]{1,5}), .*?, (?P<channels>.*?),.*$'
+    pattern = '^Stream #\d:\d(\((?P<lang>[a-z]{3})\))?: Audio: (?P<codec>[a-zA-Z0-9]{1,5})( [^,]*)?, .*?, (?P<channels>.*?),.*$'
     s_match = re.match(pattern, stream_line)
     keys = ['codec', 'lang', 'channels']
     print(stream_line)
@@ -68,6 +76,7 @@ def extract_audio_streams(input_file, lang):
 
     # Apply filtering by language only if language is defined in stream info and
     # at least one stream is of wanted language.
+    print(stream_info)
     lang_found = {single_stream['lang'] for single_stream in stream_info}
     lang_inter = lang_wanted.intersection(lang_found)
     filter_by_lang = len(lang_inter) > 0
@@ -76,12 +85,19 @@ def extract_audio_streams(input_file, lang):
                                      if single_stream['lang'] in lang_inter]
     return stream_info
 
-def estimate_audio_gain(input_file, single_stream_info):
+def get_ffmpeg_channels_param(channel_arg, stream_info):
+    ffmpeg_channels = ''
+    if channel_arg > 0:
+        ffmpeg_channels = ' -ac {} '.format(channel_arg)
+    if channel_arg == 0 and stream_info['channels'].find('5.1') != -1:
+        ffmpeg_channels = ' -ac 2 '
+    return ffmpeg_channels
+
+def estimate_audio_gain(input_file, single_stream_info, cmd_args):
     ssi = single_stream_info
-    ffmpeg_2ch = ' -ac 2 '
 
     rg_analyze_pattern = 'ffmpeg -hide_banner -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -af "volumedetect" -f wav -y {3}'
-    channel_setting = ffmpeg_2ch if ssi['channels'].find('5.1') != -1 else ''
+    channel_setting = get_ffmpeg_channels_param(cmd_args.channels, ssi)
     rg_line = rg_analyze_pattern.format(input_file, ssi['index'], channel_setting, os.devnull)
     rg_proc = sarge.run(rg_line, stdout=sarge.Capture(), stderr=sarge.Capture())
     # print(rg_proc.stdout.text)
@@ -91,32 +107,50 @@ def estimate_audio_gain(input_file, single_stream_info):
     result = float(dbm[0])
     return result
 
-def encode_streams(input_file, stream_info):
+def encode_single_stream(cmd_args, stream, input_file, output_file):
     apply_gain = True
-    ffmpeg_2ch = ' -ac 2 '
+
     # whole_pattern = 'ffmpeg -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} -f wav - | neroaacenc -q 0.xx -ignorelength -if - -of temp.m4a'
     ffmpeg_pattern = 'ffmpeg -hide_banner -i {0} -vn -sn -map 0:a:{1} -af "aresample=async=1" {2} {3} -f wav -'
     aac_pattern = 'neroaacenc -q 0.42 -ignorelength -if - -of {}'
     gain_pattern = ' -af "volume=+{0:.1f}dB" '
-    
-    out_files = []
+
     if input_file.find(' ') != -1:
         input_file = '"{}"'.format(input_file)
+
+    channel_setting = get_ffmpeg_channels_param(cmd_args.channels, stream)
+    volume_setting = ''
+    if apply_gain:
+        gain = estimate_audio_gain(input_file, stream, cmd_args)
+        volume_setting = gain_pattern.format(gain)
+    ffmpeg_line = ffmpeg_pattern.format(input_file, stream['index'], channel_setting, volume_setting)
+    aac_line = aac_pattern.format(output_file)
+    print (ffmpeg_line)
+    print (aac_line)
+    sarge.run(ffmpeg_line + ' | ' + aac_line)
+
+def generate_podcast_name(input_name):
+    (base, ext) = os.path.splitext(input_name)
+    result = base + '.m4a'
+    if result == input_name:
+        result = base + '_aac.m4a'
+    return result
+
+def encode_streams(input_file, stream_info, cmd_args):
+    
+    out_temp_files = []
+
     for stream in stream_info:
-        tempname = generate_temp_name('stream{}'.format(stream['index']), 'm4a')
-        stream['tempfile'] = tempname
-        channel_setting = ffmpeg_2ch if stream['channels'].find('5.1') != -1 else ''
-        volume_setting = ''
-        if apply_gain:
-            gain = estimate_audio_gain(input_file, stream)
-            volume_setting = gain_pattern.format(gain)
-        ffmpeg_line = ffmpeg_pattern.format(input_file, stream['index'], channel_setting, volume_setting)
-        aac_line = aac_pattern.format(tempname)
-        print (ffmpeg_line)
-        print (aac_line)
-        sarge.run(ffmpeg_line + ' | ' + aac_line)
-        out_files.append(tempname)
-    return out_files
+        if not cmd_args.podcast:
+            tempname = generate_temp_name('stream{}'.format(stream['index']), 'm4a')
+            stream['tempfile'] = tempname
+
+            encode_single_stream(cmd_args, stream, input_file, tempname)
+            out_temp_files.append(tempname)
+        else:
+            output_file = generate_podcast_name(input_file)
+            encode_single_stream(cmd_args, stream, input_file, output_file)
+    return out_temp_files
 
 def generate_output_name(input_name):
     (base, ext) = os.path.splitext(input_name)
@@ -147,10 +181,11 @@ def run():
     args = parse_args()
     input_list = extract_input_list(args.input)
     for input_file in input_list:
-        print('Processing {}'.format(input_file))
+        print('Processing {}'.format(input_file, encoding='utf8'))
         streams = extract_audio_streams(input_file, args.lang)
-        enc_streams = encode_streams(input_file, streams)
-        mux_streams(input_file, enc_streams)
+        enc_streams = encode_streams(input_file, streams, args)
+        if not args.podcast:
+            mux_streams(input_file, enc_streams)
         delete_encoded_streams(enc_streams)
     print('Done.')
 
